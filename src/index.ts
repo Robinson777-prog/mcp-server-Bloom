@@ -520,3 +520,204 @@ const EXTRACT_TOOL: Tool = {
     required: ['urls'],
   },
 };
+
+const DEEP_RESEARCH_TOOL: Tool = {
+  name: 'firecrawl_deep_research',
+  description:
+    'Conduct deep research on a query using web crawling, search, and AI analysis.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      query: {
+        type: 'string',
+        description: 'The query to research',
+      },
+      maxDepth: {
+        type: 'number',
+        description: 'Maximum depth of research iterations (1-10)',
+      },
+      timeLimit: {
+        type: 'number',
+        description: 'Time limit in seconds (30-300)',
+      },
+      maxUrls: {
+        type: 'number',
+        description: 'Maximum number of URLs to analyze (1-1000)',
+      },
+    },
+    required: ['query'],
+  },
+};
+
+const GENERATE_LLMSTXT_TOOL: Tool = {
+  name: 'firecrawl_generate_llmstxt',
+  description:
+    'Generate standardized LLMs.txt file for a given URL, which provides context about how LLMs should interact with the website.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      url: {
+        type: 'string',
+        description: 'The URL to generate LLMs.txt from',
+      },
+      maxUrls: {
+        type: 'number',
+        description: 'Maximum number of URLs to process (1-100, default: 10)',
+      },
+      showFullText: {
+        type: 'boolean',
+        description: 'Whether to show the full LLMs-full.txt in the response',
+      },
+    },
+    required: ['url'],
+  },
+};
+
+// Type definitions
+interface BatchScrapeOptions {
+  urls: string[];
+  options?: Omit<ScrapeParams, 'url'>;
+}
+
+/**
+ * Parameters for LLMs.txt generation operations.
+ */
+interface GenerateLLMsTextParams {
+  /**
+   * Maximum number of URLs to process (1-100)
+   * @default 10
+   */
+  maxUrls?: number;
+  /**
+   * Whether to show the full LLMs-full.txt in the response
+   * @default false
+   */
+  showFullText?: boolean;
+  /**
+   * Experimental flag for streaming
+   */
+  __experimental_stream?: boolean;
+}
+
+/**
+ * Response interface for LLMs.txt generation operations.
+ */
+// interface GenerateLLMsTextResponse {
+//   success: boolean;
+//   id: string;
+// }
+
+/**
+ * Status response interface for LLMs.txt generation operations.
+ */
+// interface GenerateLLMsTextStatusResponse {
+//   success: boolean;
+//   data: {
+//     llmstxt: string;
+//     llmsfulltxt?: string;
+//   };
+//   status: 'processing' | 'completed' | 'failed';
+//   error?: string;
+//   expiresAt: string;
+// }
+
+interface StatusCheckOptions {
+  id: string;
+}
+
+interface SearchOptions {
+  query: string;
+  limit?: number;
+  lang?: string;
+  country?: string;
+  tbs?: string;
+  filter?: string;
+  location?: {
+    country?: string;
+    languages?: string[];
+  };
+  scrapeOptions?: {
+    formats?: string[];
+    onlyMainContent?: boolean;
+    waitFor?: number;
+  };
+}
+
+// Add after other interfaces
+interface ExtractParams<T = any> {
+  prompt?: string;
+  systemPrompt?: string;
+  schema?: T | object;
+  allowExternalLinks?: boolean;
+  enableWebSearch?: boolean;
+  includeSubdomains?: boolean;
+  origin?: string;
+}
+
+interface ExtractArgs {
+  urls: string[];
+  prompt?: string;
+  systemPrompt?: string;
+  schema?: object;
+  allowExternalLinks?: boolean;
+  enableWebSearch?: boolean;
+  includeSubdomains?: boolean;
+  origin?: string;
+}
+
+interface ExtractResponse<T = any> {
+  success: boolean;
+  data: T;
+  error?: string;
+  warning?: string;
+  creditsUsed?: number;
+}
+
+// Type guards
+function isScrapeOptions(
+  args: unknown
+): args is ScrapeParams & { url: string } {
+  return (
+    typeof args === 'object' &&
+    args !== null &&
+    'url' in args &&
+    typeof (args as { url: unknown }).url === 'string'
+  );
+}
+
+function isMapOptions(args: unknown): args is MapParams & { url: string } {
+  return (
+    typeof args === 'object' &&
+    args !== null &&
+    'url' in args &&
+    typeof (args as { url: unknown }).url === 'string'
+  );
+}
+
+function isCrawlOptions(args: unknown): args is CrawlParams & { url: string } {
+  return (
+    typeof args === 'object' &&
+    args !== null &&
+    'url' in args &&
+    typeof (args as { url: unknown }).url === 'string'
+  );
+}
+
+function isBatchScrapeOptions(args: unknown): args is BatchScrapeOptions {
+  return (
+    typeof args === 'object' &&
+    args !== null &&
+    'urls' in args &&
+    Array.isArray((args as { urls: unknown }).urls) &&
+    (args as { urls: unknown[] }).urls.every((url) => typeof url === 'string')
+  );
+}
+
+function isStatusCheckOptions(args: unknown): args is StatusCheckOptions {
+  return (
+    typeof args === 'object' &&
+    args !== null &&
+    'id' in args &&
+    typeof (args as { id: unknown }).id === 'string'
+  );
+}
