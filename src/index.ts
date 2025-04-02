@@ -721,3 +721,343 @@ function isStatusCheckOptions(args: unknown): args is StatusCheckOptions {
     typeof (args as { id: unknown }).id === 'string'
   );
 }
+
+function isSearchOptions(args: unknown): args is SearchOptions {
+  return (
+    typeof args === 'object' &&
+    args !== null &&
+    'query' in args &&
+    typeof (args as { query: unknown }).query === 'string'
+  );
+}
+
+function isExtractOptions(args: unknown): args is ExtractArgs {
+  if (typeof args !== 'object' || args === null) return false;
+  const { urls } = args as { urls?: unknown };
+  return (
+    Array.isArray(urls) &&
+    urls.every((url): url is string => typeof url === 'string')
+  );
+}
+
+function isGenerateLLMsTextOptions(
+  args: unknown
+): args is { url: string } & Partial<GenerateLLMsTextParams> {
+  return (
+    typeof args === 'object' &&
+    args !== null &&
+    'url' in args &&
+    typeof (args as { url: unknown }).url === 'string'
+  );
+}
+
+// Server implementation
+const server = new Server(
+  {
+    name: 'firecrawl-mcp',
+    version: '1.7.0',
+  },
+  {
+    capabilities: {
+      tools: {},
+      logging: {},
+    },
+  }
+);
+
+// Get optional API URL
+const FIRECRAWL_API_URL = process.env.FIRECRAWL_API_URL;
+const FIRECRAWL_API_KEY = process.env.FIRECRAWL_API_KEY;
+
+// Check if API key is required (only for cloud service)
+if (!FIRECRAWL_API_URL && !FIRECRAWL_API_KEY) {
+  console.error(
+    'Error: FIRECRAWL_API_KEY environment variable is required when using the cloud service'
+  );
+  process.exit(1);
+}
+
+// Initialize FireCrawl client with optional API URL
+const client = new FirecrawlApp({
+  apiKey: FIRECRAWL_API_KEY || '',
+  ...(FIRECRAWL_API_URL ? { apiUrl: FIRECRAWL_API_URL } : {}),
+});
+
+// Configuration for retries and monitoring
+const CONFIG = {
+  retry: {
+    maxAttempts: Number(process.env.FIRECRAWL_RETRY_MAX_ATTEMPTS) || 3,
+    initialDelay: Number(process.env.FIRECRAWL_RETRY_INITIAL_DELAY) || 1000,
+    maxDelay: Number(process.env.FIRECRAWL_RETRY_MAX_DELAY) || 10000,
+    backoffFactor: Number(process.env.FIRECRAWL_RETRY_BACKOFF_FACTOR) || 2,
+  },
+  credit: {
+    warningThreshold:
+      Number(process.env.FIRECRAWL_CREDIT_WARNING_THRESHOLD) || 1000,
+    criticalThreshold:
+      Number(process.env.FIRECRAWL_CREDIT_CRITICAL_THRESHOLD) || 100,
+  },
+};
+
+// Add credit tracking
+interface CreditUsage {
+  total: number;
+  lastCheck: number;
+}
+
+const creditUsage: CreditUsage = {
+  total: 0,
+  lastCheck: Date.now(),
+};
+
+// Add utility function for delay
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+let isStdioTransport = false;
+
+function safeLog(
+  level:
+    | 'error'
+    | 'debug'
+    | 'info'
+    | 'notice'
+    | 'warning'
+    | 'critical'
+    | 'alert'
+    | 'emergency',
+  data: any
+): void {
+  if (isStdioTransport) {
+    // For stdio transport, log to stderr to avoid protocol interference
+    console.error(
+      `[${level}] ${typeof data === 'object' ? JSON.stringify(data) : data}`
+    );
+  } else {
+    // For other transport types, use the normal logging mechanism
+    server.sendLoggingMessage({ level, data });
+  }
+}
+
+// Add retry logic with exponential backoff
+async function withRetry<T>(
+  operation: () => Promise<T>,
+  context: string,
+  attempt = 1
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    const isRateLimit =
+      error instanceof Error &&
+      (error.message.includes('rate limit') || error.message.includes('429'));
+
+    if (isRateLimit && attempt < CONFIG.retry.maxAttempts) {
+      const delayMs = Math.min(
+        CONFIG.retry.initialDelay *
+          Math.pow(CONFIG.retry.backoffFactor, attempt - 1),
+        CONFIG.retry.maxDelay
+      );
+
+      safeLog(
+        'warning',
+        `Rate limit hit for ${context}. Attempt ${attempt}/${CONFIG.retry.maxAttempts}. Retrying in ${delayMs}ms`
+      );
+
+      await delay(delayMs);
+      return withRetry(operation, context, attempt + 1);
+    }
+
+    throw error;
+  }
+}
+
+// Add credit monitoring
+async function updateCreditUsage(creditsUsed: number): Promise<void> {
+  creditUsage.total += creditsUsed;
+
+  // Log credit usage
+  safeLog('info', `Credit usage: ${creditUsage.total} credits used total`);
+
+  // Check thresholds
+  if (creditUsage.total >= CONFIG.credit.criticalThreshold) {
+    safeLog('error', `CRITICAL: Credit usage has reached ${creditUsage.total}`);
+  } else if (creditUsage.total >= CONFIG.credit.warningThreshold) {
+    safeLog(
+      'warning',
+      `WARNING: Credit usage has reached ${creditUsage.total}`
+    );
+  }
+}
+
+// Add before server implementation
+interface QueuedBatchOperation {
+  id: string;
+  urls: string[];
+  options?: any;
+  status: 'pending' | 'processing' | 'completed' | 'failed';
+  progress: {
+    completed: number;
+    total: number;
+  };
+  result?: any;
+  error?: string;
+}
+
+// Initialize queue system
+const batchQueue = new PQueue({ concurrency: 1 });
+const batchOperations = new Map<string, QueuedBatchOperation>();
+let operationCounter = 0;
+
+async function processBatchOperation(
+  operation: QueuedBatchOperation
+): Promise<void> {
+  try {
+    operation.status = 'processing';
+    let totalCreditsUsed = 0;
+
+    // Use library's built-in batch processing
+    const response = await withRetry(
+      async () =>
+        client.asyncBatchScrapeUrls(operation.urls, operation.options),
+      `batch ${operation.id} processing`
+    );
+
+    if (!response.success) {
+      throw new Error(response.error || 'Batch operation failed');
+    }
+
+    // Track credits if using cloud API
+    if (!FIRECRAWL_API_URL && hasCredits(response)) {
+      totalCreditsUsed += response.creditsUsed;
+      await updateCreditUsage(response.creditsUsed);
+    }
+
+    operation.status = 'completed';
+    operation.result = response;
+
+    // Log final credit usage for the batch
+    if (!FIRECRAWL_API_URL) {
+      safeLog(
+        'info',
+        `Batch ${operation.id} completed. Total credits used: ${totalCreditsUsed}`
+      );
+    }
+  } catch (error) {
+    operation.status = 'failed';
+    operation.error = error instanceof Error ? error.message : String(error);
+
+    safeLog('error', `Batch ${operation.id} failed: ${operation.error}`);
+  }
+}
+
+// Tool handlers
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: [
+    SCRAPE_TOOL,
+    MAP_TOOL,
+    CRAWL_TOOL,
+    BATCH_SCRAPE_TOOL,
+    CHECK_BATCH_STATUS_TOOL,
+    CHECK_CRAWL_STATUS_TOOL,
+    SEARCH_TOOL,
+    EXTRACT_TOOL,
+    DEEP_RESEARCH_TOOL,
+    GENERATE_LLMSTXT_TOOL,
+  ],
+}));
+
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const startTime = Date.now();
+  try {
+    const { name, arguments: args } = request.params;
+
+    // Log incoming request with timestamp
+    safeLog(
+      'info',
+      `[${new Date().toISOString()}] Received request for tool: ${name}`
+    );
+
+    if (!args) {
+      throw new Error('No arguments provided');
+    }
+
+    switch (name) {
+      case 'firecrawl_scrape': {
+        if (!isScrapeOptions(args)) {
+          throw new Error('Invalid arguments for firecrawl_scrape');
+        }
+        const { url, ...options } = args;
+        try {
+          const scrapeStartTime = Date.now();
+          safeLog(
+            'info',
+            `Starting scrape for URL: ${url} with options: ${JSON.stringify(options)}`
+          );
+
+          //@ts-ignore
+          const response = await client.scrapeUrl(url, { ...options, origin: 'mcp-server' });
+
+          // Log performance metrics
+          safeLog(
+            'info',
+            `Scrape completed in ${Date.now() - scrapeStartTime}ms`
+          );
+
+          if ('success' in response && !response.success) {
+            throw new Error(response.error || 'Scraping failed');
+          }
+
+          // Format content based on requested formats
+          const contentParts = [];
+
+          if (options.formats?.includes('markdown') && response.markdown) {
+            contentParts.push(response.markdown);
+          }
+          if (options.formats?.includes('html') && response.html) {
+            contentParts.push(response.html);
+          }
+          if (options.formats?.includes('rawHtml') && response.rawHtml) {
+            contentParts.push(response.rawHtml);
+          }
+          if (options.formats?.includes('links') && response.links) {
+            contentParts.push(response.links.join('\n'));
+          }
+          if (options.formats?.includes('screenshot') && response.screenshot) {
+            contentParts.push(response.screenshot);
+          }
+          if (options.formats?.includes('extract') && response.extract) {
+            contentParts.push(JSON.stringify(response.extract, null, 2));
+          }
+
+          // If options.formats is empty, default to markdown
+          if (!options.formats || options.formats.length === 0) {
+            options.formats = ['markdown'];
+          }
+
+          // Add warning to response if present
+          if (response.warning) {
+            safeLog('warning', response.warning);
+          }
+
+          return {
+            content: [
+              {
+                type: 'text',
+                text: trimResponseText(
+                  contentParts.join('\n\n') || 'No content available'
+                ),
+              },
+            ],
+            isError: false,
+          };
+        } catch (error) {
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+          return {
+            content: [{ type: 'text', text: trimResponseText(errorMessage) }],
+            isError: true,
+          };
+        }
+      }
