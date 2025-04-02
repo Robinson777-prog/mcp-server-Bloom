@@ -1061,3 +1061,313 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
       }
+
+    case 'firecrawl_map': {
+        if (!isMapOptions(args)) {
+          throw new Error('Invalid arguments for firecrawl_map');
+        }
+        const { url, ...options } = args;
+        //@ts-ignore
+        const response = await client.mapUrl(url, { ...options, origin: 'mcp-server' });
+        if ('error' in response) {
+          throw new Error(response.error);
+        }
+        if (!response.links) {
+          throw new Error('No links received from FireCrawl API');
+        }
+        return {
+          content: [
+            { type: 'text', text: trimResponseText(response.links.join('\n')) },
+          ],
+          isError: false,
+        };
+      }
+
+      case 'firecrawl_batch_scrape': {
+        if (!isBatchScrapeOptions(args)) {
+          throw new Error('Invalid arguments for firecrawl_batch_scrape');
+        }
+
+        try {
+          const operationId = `batch_${++operationCounter}`;
+          const operation: QueuedBatchOperation = {
+            id: operationId,
+            urls: args.urls,
+            options: args.options,
+            status: 'pending',
+            progress: {
+              completed: 0,
+              total: args.urls.length,
+            },
+          };
+
+          batchOperations.set(operationId, operation);
+
+          // Queue the operation
+          batchQueue.add(() => processBatchOperation(operation));
+
+          safeLog(
+            'info',
+            `Queued batch operation ${operationId} with ${args.urls.length} URLs`
+          );
+
+          return {
+            content: [
+              {
+                type: 'text',
+                text: trimResponseText(
+                  `Batch operation queued with ID: ${operationId}. Use firecrawl_check_batch_status to check progress.`
+                ),
+              },
+            ],
+            isError: false,
+          };
+        } catch (error) {
+          const errorMessage =
+            error instanceof Error
+              ? error.message
+              : `Batch operation failed: ${JSON.stringify(error)}`;
+          return {
+            content: [{ type: 'text', text: trimResponseText(errorMessage) }],
+            isError: true,
+          };
+        }
+      }
+
+      case 'firecrawl_check_batch_status': {
+        if (!isStatusCheckOptions(args)) {
+          throw new Error('Invalid arguments for firecrawl_check_batch_status');
+        }
+
+        const operation = batchOperations.get(args.id);
+        if (!operation) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: trimResponseText(
+                  `No batch operation found with ID: ${args.id}`
+                ),
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        const status = `Batch Status:
+Status: ${operation.status}
+Progress: ${operation.progress.completed}/${operation.progress.total}
+${operation.error ? `Error: ${operation.error}` : ''}
+${
+  operation.result
+    ? `Results: ${JSON.stringify(operation.result, null, 2)}`
+    : ''
+}`;
+
+        return {
+          content: [{ type: 'text', text: trimResponseText(status) }],
+          isError: false,
+        };
+      }
+
+      case 'firecrawl_crawl': {
+        if (!isCrawlOptions(args)) {
+          throw new Error('Invalid arguments for firecrawl_crawl');
+        }
+        const { url, ...options } = args;
+        const response = await withRetry(
+          //@ts-ignore
+          async () => client.asyncCrawlUrl(url, { ...options, origin: 'mcp-server' }),
+          'crawl operation'
+        );
+
+        if (!response.success) {
+          throw new Error(response.error);
+        }
+
+        // Monitor credits for cloud API
+        if (!FIRECRAWL_API_URL && hasCredits(response)) {
+          await updateCreditUsage(response.creditsUsed);
+        }
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: trimResponseText(
+                `Started crawl for ${url} with job ID: ${response.id}`
+              ),
+            },
+          ],
+          isError: false,
+        };
+      }
+
+      case 'firecrawl_check_crawl_status': {
+        if (!isStatusCheckOptions(args)) {
+          throw new Error('Invalid arguments for firecrawl_check_crawl_status');
+        }
+        const response = await client.checkCrawlStatus(args.id);
+        if (!response.success) {
+          throw new Error(response.error);
+        }
+        const status = `Crawl Status:
+Status: ${response.status}
+Progress: ${response.completed}/${response.total}
+Credits Used: ${response.creditsUsed}
+Expires At: ${response.expiresAt}
+${
+  response.data.length > 0 ? '\nResults:\n' + formatResults(response.data) : ''
+}`;
+        return {
+          content: [{ type: 'text', text: trimResponseText(status) }],
+          isError: false,
+        };
+      }
+
+      case 'firecrawl_search': {
+        if (!isSearchOptions(args)) {
+          throw new Error('Invalid arguments for firecrawl_search');
+        }
+        try {
+          const response = await withRetry(
+            async () => client.search(args.query, { ...args, origin: 'mcp-server' }),
+            'search operation'
+          );
+
+          if (!response.success) {
+            throw new Error(
+              `Search failed: ${response.error || 'Unknown error'}`
+            );
+          }
+
+          // Monitor credits for cloud API
+          if (!FIRECRAWL_API_URL && hasCredits(response)) {
+            await updateCreditUsage(response.creditsUsed);
+          }
+
+          // Format the results
+          const results = response.data
+            .map(
+              (result) =>
+                `URL: ${result.url}
+Title: ${result.title || 'No title'}
+Description: ${result.description || 'No description'}
+${result.markdown ? `\nContent:\n${result.markdown}` : ''}`
+            )
+            .join('\n\n');
+
+          return {
+            content: [{ type: 'text', text: trimResponseText(results) }],
+            isError: false,
+          };
+        } catch (error) {
+          const errorMessage =
+            error instanceof Error
+              ? error.message
+              : `Search failed: ${JSON.stringify(error)}`;
+          return {
+            content: [{ type: 'text', text: trimResponseText(errorMessage) }],
+            isError: true,
+          };
+        }
+      }
+
+      case 'firecrawl_extract': {
+        if (!isExtractOptions(args)) {
+          throw new Error('Invalid arguments for firecrawl_extract');
+        }
+
+        try {
+          const extractStartTime = Date.now();
+
+          safeLog(
+            'info',
+            `Starting extraction for URLs: ${args.urls.join(', ')}`
+          );
+
+          // Log if using self-hosted instance
+          if (FIRECRAWL_API_URL) {
+            safeLog('info', 'Using self-hosted instance for extraction');
+          }
+
+          const extractResponse = await withRetry(
+            async () =>
+              client.extract(args.urls, {
+                prompt: args.prompt,
+                systemPrompt: args.systemPrompt,
+                schema: args.schema,
+                allowExternalLinks: args.allowExternalLinks,
+                enableWebSearch: args.enableWebSearch,
+                includeSubdomains: args.includeSubdomains,
+                origin: 'mcp-server',
+              } as ExtractParams),
+            'extract operation'
+          );
+
+          // Type guard for successful response
+          if (!('success' in extractResponse) || !extractResponse.success) {
+            throw new Error(extractResponse.error || 'Extraction failed');
+          }
+
+          const response = extractResponse as ExtractResponse;
+
+          // Monitor credits for cloud API
+          if (!FIRECRAWL_API_URL && hasCredits(response)) {
+            await updateCreditUsage(response.creditsUsed || 0);
+          }
+
+          // Log performance metrics
+          safeLog(
+            'info',
+            `Extraction completed in ${Date.now() - extractStartTime}ms`
+          );
+
+          // Add warning to response if present
+          const result = {
+            content: [
+              {
+                type: 'text',
+                text: trimResponseText(JSON.stringify(response.data, null, 2)),
+              },
+            ],
+            isError: false,
+          };
+
+          if (response.warning) {
+            safeLog('warning', response.warning);
+          }
+
+          return result;
+        } catch (error) {
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+
+          // Special handling for self-hosted instance errors
+          if (
+            FIRECRAWL_API_URL &&
+            errorMessage.toLowerCase().includes('not supported')
+          ) {
+            safeLog(
+              'error',
+              'Extraction is not supported by this self-hosted instance'
+            );
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: trimResponseText(
+                    'Extraction is not supported by this self-hosted instance. Please ensure LLM support is configured.'
+                  ),
+                },
+              ],
+              isError: true,
+            };
+          }
+
+          return {
+            content: [{ type: 'text', text: trimResponseText(errorMessage) }],
+            isError: true,
+          };
+        }
+      }
