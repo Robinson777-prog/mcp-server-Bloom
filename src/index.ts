@@ -1371,3 +1371,73 @@ ${result.markdown ? `\nContent:\n${result.markdown}` : ''}`
           };
         }
       }
+
+       case 'firecrawl_deep_research': {
+        if (!args || typeof args !== 'object' || !('query' in args)) {
+          throw new Error('Invalid arguments for firecrawl_deep_research');
+        }
+
+        try {
+          const researchStartTime = Date.now();
+          safeLog('info', `Starting deep research for query: ${args.query}`);
+
+          const response = await client.deepResearch(
+            args.query as string,
+            {
+              maxDepth: args.maxDepth as number,
+              timeLimit: args.timeLimit as number,
+              maxUrls: args.maxUrls as number,
+              //@ts-ignore
+              origin: 'mcp-server',
+            },
+            // Activity callback
+            (activity) => {
+              safeLog(
+                'info',
+                `Research activity: ${activity.message} (Depth: ${activity.depth})`
+              );
+            },
+            // Source callback
+            (source) => {
+              safeLog(
+                'info',
+                `Research source found: ${source.url}${source.title ? ` - ${source.title}` : ''}`
+              );
+            }
+          );
+
+          // Log performance metrics
+          safeLog(
+            'info',
+            `Deep research completed in ${Date.now() - researchStartTime}ms`
+          );
+
+          if (!response.success) {
+            throw new Error(response.error || 'Deep research failed');
+          }
+
+          // Format the results
+          const formattedResponse = {
+            finalAnalysis: response.data.finalAnalysis,
+            activities: response.data.activities,
+            sources: response.data.sources,
+          };
+
+          return {
+            content: [
+              {
+                type: 'text',
+                text: trimResponseText(formattedResponse.finalAnalysis),
+              },
+            ],
+            isError: false,
+          };
+        } catch (error) {
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+          return {
+            content: [{ type: 'text', text: trimResponseText(errorMessage) }],
+            isError: true,
+          };
+        }
+      }
