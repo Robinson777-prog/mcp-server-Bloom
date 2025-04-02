@@ -374,3 +374,149 @@ const BATCH_SCRAPE_TOOL: Tool = {
     required: ['urls'],
   },
 };
+
+const CHECK_BATCH_STATUS_TOOL: Tool = {
+  name: 'firecrawl_check_batch_status',
+  description: 'Check the status of a batch scraping job.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      id: {
+        type: 'string',
+        description: 'Batch job ID to check',
+      },
+    },
+    required: ['id'],
+  },
+};
+
+const CHECK_CRAWL_STATUS_TOOL: Tool = {
+  name: 'firecrawl_check_crawl_status',
+  description: 'Check the status of a crawl job.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      id: {
+        type: 'string',
+        description: 'Crawl job ID to check',
+      },
+    },
+    required: ['id'],
+  },
+};
+
+const SEARCH_TOOL: Tool = {
+  name: 'firecrawl_search',
+  description:
+    'Search and retrieve content from web pages with optional scraping. ' +
+    'Returns SERP results by default (url, title, description) or full page content when scrapeOptions are provided.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      query: {
+        type: 'string',
+        description: 'Search query string',
+      },
+      limit: {
+        type: 'number',
+        description: 'Maximum number of results to return (default: 5)',
+      },
+      lang: {
+        type: 'string',
+        description: 'Language code for search results (default: en)',
+      },
+      country: {
+        type: 'string',
+        description: 'Country code for search results (default: us)',
+      },
+      tbs: {
+        type: 'string',
+        description: 'Time-based search filter',
+      },
+      filter: {
+        type: 'string',
+        description: 'Search filter',
+      },
+      location: {
+        type: 'object',
+        properties: {
+          country: {
+            type: 'string',
+            description: 'Country code for geolocation',
+          },
+          languages: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Language codes for content',
+          },
+        },
+        description: 'Location settings for search',
+      },
+      scrapeOptions: {
+        type: 'object',
+        properties: {
+          formats: {
+            type: 'array',
+            items: {
+              type: 'string',
+              enum: ['markdown', 'html', 'rawHtml'],
+            },
+            description: 'Content formats to extract from search results',
+          },
+          onlyMainContent: {
+            type: 'boolean',
+            description: 'Extract only the main content from results',
+          },
+          waitFor: {
+            type: 'number',
+            description: 'Time in milliseconds to wait for dynamic content',
+          },
+        },
+        description: 'Options for scraping search results',
+      },
+    },
+    required: ['query'],
+  },
+};
+
+const EXTRACT_TOOL: Tool = {
+  name: 'firecrawl_extract',
+  description:
+    'Extract structured information from web pages using LLM. ' +
+    'Supports both cloud AI and self-hosted LLM extraction.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      urls: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'List of URLs to extract information from',
+      },
+      prompt: {
+        type: 'string',
+        description: 'Prompt for the LLM extraction',
+      },
+      systemPrompt: {
+        type: 'string',
+        description: 'System prompt for LLM extraction',
+      },
+      schema: {
+        type: 'object',
+        description: 'JSON schema for structured data extraction',
+      },
+      allowExternalLinks: {
+        type: 'boolean',
+        description: 'Allow extraction from external links',
+      },
+      enableWebSearch: {
+        type: 'boolean',
+        description: 'Enable web search for additional context',
+      },
+      includeSubdomains: {
+        type: 'boolean',
+        description: 'Include subdomains in extraction',
+      },
+    },
+    required: ['urls'],
+  },
+};
