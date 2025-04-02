@@ -1441,3 +1441,151 @@ ${result.markdown ? `\nContent:\n${result.markdown}` : ''}`
           };
         }
       }
+
+    case 'firecrawl_generate_llmstxt': {
+        if (!isGenerateLLMsTextOptions(args)) {
+          throw new Error('Invalid arguments for firecrawl_generate_llmstxt');
+        }
+
+        try {
+          const { url, ...params } = args;
+          const generateStartTime = Date.now();
+
+          safeLog('info', `Starting LLMs.txt generation for URL: ${url}`);
+
+          // Start the generation process
+          const response = await withRetry(
+            //@ts-ignore
+            async () => client.generateLLMsText(url, { ...params, origin: 'mcp-server' }),
+            'LLMs.txt generation'
+          );
+
+          if (!response.success) {
+            throw new Error(response.error || 'LLMs.txt generation failed');
+          }
+
+          // Log performance metrics
+          safeLog(
+            'info',
+            `LLMs.txt generation completed in ${Date.now() - generateStartTime}ms`
+          );
+
+          // Format the response
+          let resultText = '';
+
+          if ('data' in response) {
+            resultText = `LLMs.txt content:\n\n${response.data.llmstxt}`;
+
+            if (args.showFullText && response.data.llmsfulltxt) {
+              resultText += `\n\nLLMs-full.txt content:\n\n${response.data.llmsfulltxt}`;
+            }
+          }
+
+          return {
+            content: [{ type: 'text', text: trimResponseText(resultText) }],
+            isError: false,
+          };
+        } catch (error) {
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+          return {
+            content: [{ type: 'text', text: trimResponseText(errorMessage) }],
+            isError: true,
+          };
+        }
+      }
+
+      default:
+        return {
+          content: [
+            { type: 'text', text: trimResponseText(`Unknown tool: ${name}`) },
+          ],
+          isError: true,
+        };
+    }
+  } catch (error) {
+    // Log detailed error information
+    safeLog('error', {
+      message: `Request failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      tool: request.params.name,
+      arguments: request.params.arguments,
+      timestamp: new Date().toISOString(),
+      duration: Date.now() - startTime,
+    });
+    return {
+      content: [
+        {
+          type: 'text',
+          text: trimResponseText(
+            `Error: ${error instanceof Error ? error.message : String(error)}`
+          ),
+        },
+      ],
+      isError: true,
+    };
+  } finally {
+    // Log request completion with performance metrics
+    safeLog('info', `Request completed in ${Date.now() - startTime}ms`);
+  }
+});
+
+// Helper function to format results
+function formatResults(data: FirecrawlDocument[]): string {
+  return data
+    .map((doc) => {
+      const content = doc.markdown || doc.html || doc.rawHtml || 'No content';
+      return `URL: ${doc.url || 'Unknown URL'}
+Content: ${content.substring(0, 100)}${content.length > 100 ? '...' : ''}
+${doc.metadata?.title ? `Title: ${doc.metadata.title}` : ''}`;
+    })
+    .join('\n\n');
+}
+
+// Add type guard for credit usage
+function hasCredits(response: any): response is { creditsUsed: number } {
+  return 'creditsUsed' in response && typeof response.creditsUsed === 'number';
+}
+
+// Utility function to trim trailing whitespace from text responses
+// This prevents Claude API errors with "final assistant content cannot end with trailing whitespace"
+function trimResponseText(text: string): string {
+  return text.trim();
+}
+
+// Server startup
+async function runServer() {
+  try {
+    console.error('Initializing FireCrawl MCP Server...');
+
+    const transport = new StdioServerTransport();
+
+    // Detect if we're using stdio transport
+    isStdioTransport = transport instanceof StdioServerTransport;
+    if (isStdioTransport) {
+      console.error(
+        'Running in stdio mode, logging will be directed to stderr'
+      );
+    }
+
+    await server.connect(transport);
+
+    // Now that we're connected, we can send logging messages
+    safeLog('info', 'FireCrawl MCP Server initialized successfully');
+    safeLog(
+      'info',
+      `Configuration: API URL: ${FIRECRAWL_API_URL || 'default'}`
+    );
+
+    console.error('FireCrawl MCP Server running on stdio');
+  } catch (error) {
+    console.error('Fatal error running server:', error);
+    process.exit(1);
+  }
+}
+
+runServer().catch((error: any) => {
+  console.error('Fatal error running server:', error);
+  process.exit(1);
+});
